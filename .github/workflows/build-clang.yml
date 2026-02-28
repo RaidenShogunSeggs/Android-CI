@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       clang_version:
-        description: 'Pilih Versi Host Clang'
+        description: 'Target Clang Version (Build Result)'
         required: true
         default: '23'
         type: choice
         options: ['13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']
       llvm_name:
-        description: 'Nama Toolchain'
+        description: 'Toolchain Name'
         required: true
         default: 'Mornye'
         type: string
       target_repo:
-        description: 'Target Repo'
+        description: 'Target Repository (For Release)'
         required: true
         default: 'RaidenShogunSeggs/mornye_clang'
         type: string
@@ -24,6 +24,7 @@ env:
   CLANG_VERSION: ${{ github.event.inputs.clang_version || '23' }}
   LLVM_NAME: ${{ github.event.inputs.llvm_name || 'Mornye' }}
   TARGET_REPO: ${{ github.event.inputs.target_repo || 'RaidenShogunSeggs/mornye_clang' }}
+  HOST_CLANG_VER: '19' # Forced Clang 19 as host builder
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
   TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
   TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -35,12 +36,13 @@ jobs:
   notify_start:
     runs-on: ubuntu-latest
     steps:
-      - name: Send Start Msg
+      - name: Send Start Notification
         run: |
-          MSG="🚀 <b>Build Started, Bre!</b>%0A%0A"
+          MSG="🚀 <b>Build Started!</b>%0A%0A"
           MSG+="<b>Toolchain:</b> ${{ env.LLVM_NAME }}%0A"
-          MSG+="<b>Clang Ver:</b> ${{ env.CLANG_VERSION }}%0A%0A"
-          MSG+="<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>监控 Logs Di Sini</a>"
+          MSG+="<b>Target Clang:</b> ${{ env.CLANG_VERSION }}%0A"
+          MSG+="<b>Host Builder:</b> Clang ${{ env.HOST_CLANG_VER }}%0A%0A"
+          MSG+="<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>📊 Monitor Logs Here</a>"
           
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage" \
             -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
@@ -59,23 +61,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Preparation & Deps
+      - name: Preparation & Dependencies
         run: |
           sudo apt-get update
           git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build llvmTC -b main
           cd llvmTC && bash ci.sh deps
 
-      - name: Setup Host Compiler
+      - name: Setup Host Compiler (Clang 19)
         run: |
-          HOST_VER=${{ env.CLANG_VERSION }}
-          [ "$HOST_VER" -ge "21" ] && HOST_VER=20
           wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
-          sudo ./llvm.sh $HOST_VER all
-          echo "ACTUAL_HOST_VER=$HOST_VER" >> $GITHUB_ENV
+          sudo ./llvm.sh ${{ env.HOST_CLANG_VER }} all
 
       - name: Clone & Patch LLVM
         run: |
-          LLVM_PATH="/usr/lib/llvm-${{ env.ACTUAL_HOST_VER }}/bin"
+          LLVM_PATH="/usr/lib/llvm-${{ env.HOST_CLANG_VER }}/bin"
           export PATH="$LLVM_PATH:/usr/lib/ccache:$PATH"
           sudo apt-get install -y ccache
 
@@ -86,18 +85,25 @@ jobs:
           cd src/llvm-project
           CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
           if [ "$CURRENT_BRANCH" == "main" ]; then
-            echo "🛠️ Patching 'main' branch..."
+            echo "🛠️ Main branch detected. Applying rollback patches..."
             find . -name "*.cmake" -type f | xargs sed -i 's/if((WIN32 AND NOT MINGW) AND NOT CLANG_LINK_CLANG_DYLIB)/if(MSVC AND NOT CLANG_LINK_CLANG_DYLIB)/g'
             sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' clang/cmake/modules/AddClang.cmake
             sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' mlir/cmake/modules/AddMLIR.cmake
             sed -i '/target_link_libraries(${obj_name} PRIVATE $<TARGET_PROPERTY:${name},LINK_LIBRARIES>)/d' llvm/cmake/modules/AddLLVM.cmake
             sed -i 's/# Bring in the target include directories and link info from our original target./# Bring in the target include directories from our original target./g' llvm/cmake/modules/AddLLVM.cmake
+          else
+            echo "⏩ Branch is $CURRENT_BRANCH. Skipping patches."
           fi
 
       - name: Build LLVM
         run: |
+          LLVM_PATH="/usr/lib/llvm-${{ env.HOST_CLANG_VER }}/bin"
+          export CC="$LLVM_PATH/clang"
+          export CXX="$LLVM_PATH/clang++"
+          export LD="$LLVM_PATH/ld.lld"
+          export PATH="$LLVM_PATH:$PATH"
+
           cd llvmTC
-          # Kita simpan log ke file biar bisa dikirim kalau error
           python3 build-llvm.py \
             --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" \
                       LLVM_PARALLEL_LINK_JOBS="$(nproc)" \
@@ -106,14 +112,13 @@ jobs:
             --llvm-folder "$(pwd)/src/llvm-project" \
             --quiet-cmake --shallow-clone --multicall \
             --targets ARM AArch64 X86 --vendor-string "${{ env.LLVM_NAME }}" 2>&1 | tee ../llvm_build.log
-          # Penting: cek exit status tee
           [ ${PIPESTATUS[0]} -eq 0 ] || exit 1
 
       - name: Send Error Log (LLVM)
         if: failure()
         run: |
-          tail -n 100 llvm_build.log > llvm_error_tail.txt
-          curl -F document=@"llvm_error_tail.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ LLVM Build Failed (Tail Log)"
+          tail -n 100 llvm_build.log > llvm_error_log.txt
+          curl -F document=@"llvm_error_log.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ LLVM Build Failed (Target: Clang ${{ env.CLANG_VERSION }})"
 
       - name: Set Metadata
         id: info
@@ -135,7 +140,6 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       archive_size: ${{ steps.pack.outputs.archive_size }}
-      archive_name: ${{ steps.pack.outputs.archive_name }}
     steps:
       - uses: actions/checkout@v4
       - name: Download LLVM Artifact
@@ -148,8 +152,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y patchelf file
           git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build tc_binutils -b main
-          cd tc_binutils
-          bash ci.sh deps
+          cd tc_binutils && bash ci.sh deps
           mv ../install_folder install
           python3 build-binutils.py --install-folder "$(pwd)/install" --targets arm aarch64 x86_64 2>&1 | tee ../binutils_build.log
           [ ${PIPESTATUS[0]} -eq 0 ] || exit 1
@@ -157,10 +160,10 @@ jobs:
       - name: Send Error Log (Binutils)
         if: failure()
         run: |
-          tail -n 100 binutils_build.log > binutils_error_tail.txt
-          curl -F document=@"binutils_error_tail.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ Binutils Build Failed (Tail Log)"
+          tail -n 100 binutils_build.log > binutils_error_log.txt
+          curl -F document=@"binutils_error_log.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ Binutils Build Failed"
 
-      - name: Packing & Calc Size
+      - name: Packing & Calculate Size
         id: pack
         run: |
           cd tc_binutils
@@ -170,10 +173,8 @@ jobs:
           
           ARCHIVE="${{ env.LLVM_NAME }}-Clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}.tar.xz"
           tar -cJf "../$ARCHIVE" -C install .
-          
           SIZE=$(du -sh "../$ARCHIVE" | awk '{print $1}')
           echo "archive_size=$SIZE" >> $GITHUB_OUTPUT
-          echo "archive_name=$ARCHIVE" >> $GITHUB_OUTPUT
 
       - name: Upload Final Toolchain
         uses: actions/upload-artifact@v4
@@ -182,42 +183,53 @@ jobs:
           path: "*.tar.xz"
 
   # ==========================================
-  # JOB 3: DEPLOY & POST-NOTIFICATION
+  # JOB 3: DEPLOY, NOTIFY & CLEANUP
   # ==========================================
   deploy:
     needs: [build_llvm, build_binutils]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Create Release
+      - name: Create GitHub Release
         if: needs.build_binutils.result == 'success'
         run: |
           gh run download ${{ github.run_id }} -n final-package
           TAG="${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}"
           TITLE="${{ env.LLVM_NAME }} Clang ${{ env.CLANG_VERSION }}: ${{ needs.build_llvm.outputs.rel_friendly }}"
-          gh release create "$TAG" *.tar.xz --repo "${{ env.TARGET_REPO }}" --title "$TITLE" --notes "Build via GitHub Actions"
+          gh release create "$TAG" *.tar.xz --repo "${{ env.TARGET_REPO }}" --title "$TITLE" --notes "Built using Clang ${{ env.HOST_CLANG_VER }} as host compiler."
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
       - name: Final Telegram Notification
         run: |
           if [[ "${{ needs.build_llvm.result }}" == "success" && "${{ needs.build_binutils.result }}" == "success" ]]; then
-            STAT="✅ <b>BUILD SUCCESS, BRE!</b>"
+            STAT="✅ <b>BUILD SUCCESS!</b>"
             INFO="%0A<b>Size:</b> ${{ needs.build_binutils.outputs.archive_size }}%0A"
             URL="https://github.com/${{ env.TARGET_REPO }}/releases/latest"
           else
             STAT="❌ <b>BUILD FAILED!</b>"
-            INFO="%0A<b>Check attached logs below</b>%0A"
+            INFO="%0A<b>Please check the error logs sent by the bot.</b>%0A"
             URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           
           MSG="$STAT%0A%0A"
           MSG+="<b>Name:</b> ${{ env.LLVM_NAME }}%0A"
-          MSG+="<b>Ver:</b> ${{ env.CLANG_VERSION }}%0A"
+          MSG+="<b>Target Ver:</b> Clang ${{ env.CLANG_VERSION }}%0A"
+          MSG+="<b>Host Builder:</b> Clang ${{ env.HOST_CLANG_VER }}%0A"
           MSG+="<b>Status:</b> LLVM (${{ needs.build_llvm.result }}), Binutils (${{ needs.build_binutils.result }})$INFO%0A"
-          MSG+="<a href='$URL'>Lihat Hasil / Full Logs</a>"
+          MSG+="<a href='$URL'>🔗 View Results / Full Logs</a>"
 
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage" \
             -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
             -d "parse_mode=HTML" \
             -d "text=$MSG"
+
+      - name: Auto-Delete Old Artifacts
+        if: always()
+        continue-on-error: true # <--- Skip if this fails, do not fail the workflow
+        run: |
+          echo "Cleaning up artifacts to save storage space..."
+          # Get artifact IDs and delete them one by one. If no artifacts, it will just exit.
+          gh api repos/${{ github.repository }}/actions/artifacts --jq '.artifacts[].id' | xargs -r -I {} gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/{}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
