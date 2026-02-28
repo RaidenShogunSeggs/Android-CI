@@ -56,7 +56,7 @@ jobs:
     needs: notify_start
     runs-on: ubuntu-22.04
     outputs:
-      rel_tag_suffix: ${{ steps.info.outputs.rel_tag_suffix }}
+      rel_date: ${{ steps.info.outputs.rel_date }}
       rel_friendly: ${{ steps.info.outputs.rel_friendly }}
     steps:
       - uses: actions/checkout@v4
@@ -91,12 +91,16 @@ jobs:
             sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' mlir/cmake/modules/AddMLIR.cmake
             sed -i '/target_link_libraries(${obj_name} PRIVATE $<TARGET_PROPERTY:${name},LINK_LIBRARIES>)/d' llvm/cmake/modules/AddLLVM.cmake
             sed -i 's/# Bring in the target include directories and link info from our original target./# Bring in the target include directories from our original target./g' llvm/cmake/modules/AddLLVM.cmake
+          else
+            echo "⏩ Branch is $CURRENT_BRANCH. Skipping patches."
           fi
 
       - name: Build LLVM
         run: |
           LLVM_PATH="/usr/lib/llvm-${{ env.HOST_CLANG_VER }}/bin"
-          export CC="$LLVM_PATH/clang" export CXX="$LLVM_PATH/clang++" export LD="$LLVM_PATH/ld.lld"
+          export CC="$LLVM_PATH/clang"
+          export CXX="$LLVM_PATH/clang++"
+          export LD="$LLVM_PATH/ld.lld"
           export PATH="$LLVM_PATH:$PATH"
 
           cd llvmTC
@@ -114,13 +118,12 @@ jobs:
         if: failure()
         run: |
           tail -n 100 llvm_build.log > llvm_error_log.txt
-          curl -F document=@"llvm_error_log.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ LLVM Build Failed (Clang ${{ env.CLANG_VERSION }})"
+          curl -F document=@"llvm_error_log.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ LLVM Build Failed (Target: Clang ${{ env.CLANG_VERSION }})"
 
       - name: Set Metadata
         id: info
         run: |
-          # Use YYYYMMDDHHMM for the unique tag
-          echo "rel_tag_suffix=$(date "+%Y%m%d%H%M")" >> $GITHUB_OUTPUT
+          echo "rel_date=$(date "+%Y%m%d%H%M")" >> $GITHUB_OUTPUT
           echo "rel_friendly=$(date "+%B %-d, %Y")" >> $GITHUB_OUTPUT
 
       - name: Upload LLVM Artifact
@@ -168,8 +171,7 @@ jobs:
           find install/lib -name "*.a" -delete -o -name "*.la" -delete
           find install -type f -exec file {} \; | grep 'not stripped' | awk -F: '{print $1}' | xargs -r strip -s
           
-          # Use the target version and friendly timestamp for the filename
-          ARCHIVE="${{ env.LLVM_NAME }}-Clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_tag_suffix }}.tar.xz"
+          ARCHIVE="${{ env.LLVM_NAME }}-Clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}.tar.xz"
           tar -cJf "../$ARCHIVE" -C install .
           SIZE=$(du -sh "../$ARCHIVE" | awk '{print $1}')
           echo "archive_size=$SIZE" >> $GITHUB_OUTPUT
@@ -188,15 +190,12 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
       - name: Create GitHub Release
         if: needs.build_binutils.result == 'success'
         run: |
           gh run download ${{ github.run_id }} -n final-package
           # FORMAT: clang-version-timestamp
-          TAG="clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_tag_suffix }}"
+          TAG="clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}"
           TITLE="${{ env.LLVM_NAME }} Clang ${{ env.CLANG_VERSION }}: ${{ needs.build_llvm.outputs.rel_friendly }}"
           gh release create "$TAG" *.tar.xz --repo "${{ env.TARGET_REPO }}" --title "$TITLE" --notes "Built using Clang ${{ env.HOST_CLANG_VER }} as host compiler."
         env:
@@ -210,7 +209,7 @@ jobs:
             URL="https://github.com/${{ env.TARGET_REPO }}/releases/latest"
           else
             STAT="❌ <b>BUILD FAILED!</b>"
-            INFO="%0A<b>Please check the logs sent by the bot.</b>%0A"
+            INFO="%0A<b>Please check the error logs sent by the bot.</b>%0A"
             URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           
@@ -228,8 +227,10 @@ jobs:
 
       - name: Auto-Delete Old Artifacts
         if: always()
-        continue-on-error: true
+        continue-on-error: true # <--- Skip if this fails, do not fail the workflow
         run: |
+          echo "Cleaning up artifacts to save storage space..."
+          # Get artifact IDs and delete them one by one. If no artifacts, it will just exit.
           gh api repos/${{ github.repository }}/actions/artifacts --jq '.artifacts[].id' | xargs -r -I {} gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/{}
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
