@@ -2,19 +2,127 @@ name: Build TC
 
 on:
   workflow_dispatch:
+    inputs:
+      clang_version:
+        description: 'Pilih Versi Host Clang'
+        required: true
+        default: '23'
+        type: choice
+        options: ['13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23']
+      llvm_name:
+        description: 'Nama Toolchain (Vendor String)'
+        required: true
+        default: 'Mornye'
+        type: string
   schedule:
     - cron: '0 17 * * *' 
+
+env:
+  CLANG_VERSION: ${{ github.event.inputs.clang_version || '23' }}
+  LLVM_NAME: ${{ github.event.inputs.llvm_name || 'Mornye' }}
+  TARGET_REPO: 'RaidenShogunSeggs/mornye_clang'
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
+  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  TZ: Asia/Jakarta
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Build TC
-        run: |
-          wget https://raw.githubusercontent.com/RaidenShogunSeggs/Android-CI/main/Common/clang.sh
-          bash clang.sh
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-        env:
-          LLVM_NAME: ${{ secrets.LLVM_NAME }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: Setup Host LLVM & Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget software-properties-common ccache lld libssl-dev patchelf file
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.CLANG_VERSION }} all
+          git config --global user.name "RaidenShogunSeggs"
+          git config --global user.email "raidenshogunseggs@gmail.com"
+
+      - name: Determine LLVM Branch
+        run: |
+          if [ "${{ env.CLANG_VERSION }}" = "23" ]; then
+            echo "LLVM_REF=main" >> $GITHUB_ENV
+          else
+            echo "LLVM_REF=release/${{ env.CLANG_VERSION }}.x" >> $GITHUB_ENV
+          fi
+
+      - name: Build Toolchain
+        run: |
+          LLVM_PATH="/usr/lib/llvm-${{ env.CLANG_VERSION }}/bin"
+          export CC="$LLVM_PATH/clang"
+          export CXX="$LLVM_PATH/clang++"
+          export LD="$LLVM_PATH/ld.lld"
+          export PATH="$LLVM_PATH:$PATH"
+
+          git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build llvmTC -b main
+          cd llvmTC
+          bash ci.sh deps
+
+          INSTALL_DIR="$(pwd)/install"
+          REL_DATE="$(date "+%Y%m%d")"
+          REL_FRIENDLY="$(date "+%B %-d, %Y")"
+          
+          # Build LLVM
+          python3 build-llvm.py \
+            --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" LLVM_PARALLEL_LINK_JOBS="$(nproc)" CMAKE_C_FLAGS=-O3 CMAKE_CXX_FLAGS=-O3 \
+            --install-folder "$INSTALL_DIR" --quiet-cmake --shallow-clone --multicall --targets ARM AArch64 X86 \
+            --ref "${{ env.LLVM_REF }}" --vendor-string "${{ env.LLVM_NAME }}"
+
+          # Build Binutils
+          python3 build-binutils.py --install-folder "$INSTALL_DIR" --targets arm aarch64 x86_64
+
+          # Cleanup & Stripping
+          rm -rf "$INSTALL_DIR/include"
+          find "$INSTALL_DIR/lib" -name "*.a" -delete -o -name "*.la" -delete
+          find "$INSTALL_DIR" -type f -exec file {} \; | grep 'not stripped' | awk -F: '{print $1}' | xargs -r strip -s
+
+          # Patching RPATH
+          find "$INSTALL_DIR" -mindepth 2 -maxdepth 3 -type f -exec file {} \; | grep 'ELF .* interpreter' | awk -F: '{print $1}' | while read -r bin; do
+            patchelf --set-rpath "\$ORIGIN/../lib" "$bin"
+          done
+
+          # Packaging
+          ARCHIVE_NAME="${{ env.LLVM_NAME }}-Clang-${{ env.CLANG_VERSION }}-$REL_DATE.tar.xz"
+          tar -cJf "../$ARCHIVE_NAME" -C "$INSTALL_DIR" .
+          
+          # Info Metadata buat Release & Telegram
+          pushd src/llvm-project
+          echo "LLVM_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          popd
+          echo "CLANG_VER_FINAL=$($INSTALL_DIR/bin/clang --version | head -n1 | cut -d' ' -f4)" >> $GITHUB_ENV
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+          echo "TAG_NAME=${{ env.CLANG_VERSION }}-$REL_DATE" >> $GITHUB_ENV
+          
+          # Upload Release
+          cd ..
+          gh release create "${{ env.CLANG_VERSION }}-$REL_DATE" "$ARCHIVE_NAME" \
+            --repo "${{ env.TARGET_REPO }}" \
+            --title "${{ env.LLVM_NAME }} Clang ${{ env.CLANG_VERSION }}: $REL_FRIENDLY" \
+            --notes "Build Clang ${{ env.CLANG_VERSION }} dari branch ${{ env.LLVM_REF }}"
+
+      - name: Send Telegram Notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            STATUS="✅ <b>Build Success, Bre!</b>"
+            LINK="<a href='https://github.com/${{ env.TARGET_REPO }}/releases/tag/${{ env.TAG_NAME }}'>Download di Sini</a>"
+          else
+            STATUS="❌ <b>Build Failed!</b>"
+            LINK="<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>Cek Log Error</a>"
+          fi
+          
+          MSG="$STATUS%0A%0A"
+          MSG+="<b>Name:</b> ${{ env.LLVM_NAME }}%0A"
+          MSG+="<b>Clang:</b> ${{ env.CLANG_VERSION }} (Final: ${{ env.CLANG_VER_FINAL }})%0A"
+          MSG+="<b>LLVM Commit:</b> ${{ env.LLVM_COMMIT }}%0A%0A"
+          MSG+="$LINK"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
+            -d "parse_mode=HTML" \
+            -d "text=$MSG"
