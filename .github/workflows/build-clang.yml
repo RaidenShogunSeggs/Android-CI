@@ -67,7 +67,10 @@ jobs:
           export LD="$LLVM_PATH/ld.lld"
           export PATH="$LLVM_PATH:$PATH"
 
-          # 2. Persiapan Folder & Clone Manual
+          # 2. Fix ccache (Pastikan terinstall & masuk path)
+          sudo apt-get install -y ccache
+          export PATH="/usr/lib/ccache:$PATH"
+
           cd llvmTC
           mkdir -p src
           
@@ -81,14 +84,13 @@ jobs:
           echo "Bypass download: Manual clone LLVM branch $REF..."
           git clone --depth 1 -b "$REF" https://github.com/llvm/llvm-project.git src/llvm-project
 
-          # 3. PATCH CMAKE (SOLUSI ERROR LU)
-          # Kita paksa target_link_libraries buat pake 'Plain Signature' biar ga berantem sama LLVM-Config
+          # 3. PATCH CMAKE (SOLUSI TOTAL ERROR SIGNATURE)
+          # Kita pake regex (-E) buat nangkep target apapun (obj.clang, dll) 
+          # dan hapus keyword PRIVATE/PUBLIC/INTERFACE
           echo "Patching CMake for Clang $REF..."
-          sed -i 's/target_link_libraries(${name} PRIVATE/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
-          sed -i 's/target_link_libraries(${name} PUBLIC/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
-          sed -i 's/target_link_libraries(${name} INTERFACE/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
+          sed -i -E 's/target_link_libraries\(([^ ]+) (PRIVATE|PUBLIC|INTERFACE)/target_link_libraries(\1/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
 
-          # 4. Build dengan --no-update (Biar hasil patch kita ga ilang ketimpa update)
+          # 4. Build dengan --no-update
           python3 build-llvm.py \
             --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" \
                       LLVM_PARALLEL_LINK_JOBS="$(nproc)" \
