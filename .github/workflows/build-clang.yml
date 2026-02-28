@@ -37,9 +37,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget software-properties-common ccache lld libssl-dev patchelf file
+          HOST_VERSION=${{ env.CLANG_VERSION }}
+          if [ "$HOST_VERSION" -ge "21" ]; then
+            echo "Menggunakan Clang 20 sebagai Host untuk membangun Clang ${{ env.CLANG_VERSION }}..."
+            HOST_VERSION=20
+          fi
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh ${{ env.CLANG_VERSION }} all
+          sudo ./llvm.sh $HOST_VERSION all
           git config --global user.name "RaidenShogunSeggs"
           git config --global user.email "raidenshogunseggs@gmail.com"
 
