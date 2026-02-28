@@ -58,7 +58,7 @@ jobs:
           sudo ./llvm.sh $HOST_VER all
           echo "ACTUAL_HOST_VER=$HOST_VER" >> $GITHUB_ENV
 
-      - name: Run Build LLVM
+      - name: Clone LLVM
         run: |
           # 1. Setup Path Compiler & Ccache
           LLVM_PATH="/usr/lib/llvm-${{ env.ACTUAL_HOST_VER }}/bin"
@@ -76,18 +76,16 @@ jobs:
           # Kita pake --depth 50 biar commit-commit barunya kebawa
           REF="main" # Karena ini khusus buat Clang 23 (main)
           echo "Cloning LLVM Project for patching..."
-          git clone --depth 50 -b "$REF" https://github.com/llvm/llvm-project.git src/llvm-project
-
-          # 3. REVERT DOSA COMMIT (SOLUSI SPESIFIK)
+          git clone --depth 1 -b "$REF" https://github.com/llvm/llvm-project.git src/llvm-project
           cd src/llvm-project
-          echo "Reverting offending commits..."
-          # Revert secara berurutan (yang paling baru dulu)
-          git revert --no-commit 20ec9a9bb72560fe73706f46415dcfb118f9d265
-          git revert --no-commit e3c045415ae52167e197d4a6ed4ad5a04e49423a
+          echo "Rolling back offending code to 'Sebelum' state..."
+          find . -name "*.cmake" -type f | xargs sed -i 's/if((WIN32 AND NOT MINGW) AND NOT CLANG_LINK_CLANG_DYLIB)/if(MSVC AND NOT CLANG_LINK_CLANG_DYLIB)/g'
+          sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' clang/cmake/modules/AddClang.cmake
+          sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' mlir/cmake/modules/AddMLIR.cmake
+          sed -i '/target_link_libraries(${obj_name} PRIVATE $<TARGET_PROPERTY:${name},LINK_LIBRARIES>)/d' llvm/cmake/modules/AddLLVM.cmake
+          sed -i 's/# Bring in the target include directories and link info from our original target./# Bring in the target include directories from our original target./g' llvm/cmake/modules/AddLLVM.cmake
+          echo "Rollback selesai! Kondisi kode sekarang sesuai dengan status 'Sebelum'."
           cd ../..
-
-          # 4. Build dengan flag --llvm-folder
-          # Kita pake --llvm-folder supaya script ga nyoba update/download lagi
           python3 build-llvm.py \
             --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" \
                       LLVM_PARALLEL_LINK_JOBS="$(nproc)" \
