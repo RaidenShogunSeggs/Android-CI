@@ -70,7 +70,7 @@ for bin in $(find install -mindepth 2 -maxdepth 3 -type f -exec file {} \; | gre
 done
 
 # Git config
-wget https://raw.githubusercontent.com/mornye1517/Android-CI/main/Common/Git-Config.sh
+wget https://raw.githubusercontent.com/RaidenShogunSeggs/Android-CI/main/Common/Git-Config.sh
 bash Git-Config.sh
 
 # Release Info
@@ -104,7 +104,7 @@ fi
 # Pakai GitHub CLI buat bikin release dan upload file
 # Tag: $rel_date, Title: Tanggal Friendly
 gh release create "$rel_date" "$ARCHIVE_NAME" \
-    --repo "mornye1517/mornye_clang" \
+    --repo "RaidenShogunSeggs/mornye_clang" \
     --title "Mornye Clang: $rel_friendly_date" \
     --notes "
 ### Build Info
