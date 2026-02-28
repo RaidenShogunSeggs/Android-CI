@@ -53,15 +53,14 @@ jobs:
 
       - name: Build Toolchain
         run: |
+          git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build llvmTC -b main
+          cd llvmTC
+          bash ci.sh deps
           LLVM_PATH="/usr/lib/llvm-${{ env.CLANG_VERSION }}/bin"
           export CC="$LLVM_PATH/clang"
           export CXX="$LLVM_PATH/clang++"
           export LD="$LLVM_PATH/ld.lld"
           export PATH="$LLVM_PATH:$PATH"
-
-          git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build llvmTC -b main
-          cd llvmTC
-          bash ci.sh deps
 
           INSTALL_DIR="$(pwd)/install"
           REL_DATE="$(date "+%Y%m%d")"
