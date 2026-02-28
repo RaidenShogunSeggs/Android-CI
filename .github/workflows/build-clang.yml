@@ -60,21 +60,49 @@ jobs:
 
       - name: Run Build LLVM
         run: |
-          # Set Compiler Path SETELAH deps beres
+          - name: Run Build LLVM
+        run: |
+          # 1. Setup Path Compiler Host
           LLVM_PATH="/usr/lib/llvm-${{ env.ACTUAL_HOST_VER }}/bin"
           export CC="$LLVM_PATH/clang"
           export CXX="$LLVM_PATH/clang++"
           export LD="$LLVM_PATH/ld.lld"
           export PATH="$LLVM_PATH:$PATH"
 
+          # 2. Persiapan Folder & Clone Manual
           cd llvmTC
-          [ "${{ env.CLANG_VERSION }}" = "23" ] && REF="main" || REF="release/${{ env.CLANG_VERSION }}.x"
+          mkdir -p src
           
-          python3 build-llvm.py \
-            --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" LLVM_PARALLEL_LINK_JOBS="$(nproc)" CMAKE_C_FLAGS=-O3 CMAKE_CXX_FLAGS=-O3 \
-            --install-folder "$(pwd)/install" --quiet-cmake --shallow-clone --multicall --targets ARM AArch64 X86 \
-            --ref "$REF" --vendor-string "${{ env.LLVM_NAME }}"
+          # Tentukan Branch Target
+          if [ "${{ env.CLANG_VERSION }}" = "23" ]; then 
+             REF="main"
+          else 
+             REF="release/${{ env.CLANG_VERSION }}.x"
+          fi
 
+          echo "Bypass download: Manual clone LLVM branch $REF..."
+          git clone --depth 1 -b "$REF" https://github.com/llvm/llvm-project.git src/llvm-project
+
+          # 3. PATCH CMAKE (SOLUSI ERROR LU)
+          # Kita paksa target_link_libraries buat pake 'Plain Signature' biar ga berantem sama LLVM-Config
+          echo "Patching CMake for Clang $REF..."
+          sed -i 's/target_link_libraries(${name} PRIVATE/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
+          sed -i 's/target_link_libraries(${name} PUBLIC/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
+          sed -i 's/target_link_libraries(${name} INTERFACE/target_link_libraries(${name}/g' src/llvm-project/clang/cmake/modules/AddClang.cmake
+
+          # 4. Build dengan --no-update (Biar hasil patch kita ga ilang ketimpa update)
+          python3 build-llvm.py \
+            --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" \
+                      LLVM_PARALLEL_LINK_JOBS="$(nproc)" \
+                      CMAKE_C_FLAGS=-O3 CMAKE_CXX_FLAGS=-O3 \
+            --install-folder "$(pwd)/install" \
+            --quiet-cmake \
+            --no-update \
+            --shallow-clone \
+            --multicall \
+            --targets ARM AArch64 X86 \
+            --ref "$REF" \
+            --vendor-string "${{ env.LLVM_NAME }}"
       - name: Set Metadata
         id: info
         run: |
