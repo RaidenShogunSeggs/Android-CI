@@ -61,7 +61,6 @@ jobs:
       - name: Run Build LLVM
         run: |
           - name: Run Build LLVM
-        run: |
           # 1. Setup Path Compiler Host
           LLVM_PATH="/usr/lib/llvm-${{ env.ACTUAL_HOST_VER }}/bin"
           export CC="$LLVM_PATH/clang"
@@ -103,6 +102,7 @@ jobs:
             --targets ARM AArch64 X86 \
             --ref "$REF" \
             --vendor-string "${{ env.LLVM_NAME }}"
+            
       - name: Set Metadata
         id: info
         run: |
