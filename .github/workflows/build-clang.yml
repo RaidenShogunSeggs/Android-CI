@@ -30,9 +30,28 @@ env:
 
 jobs:
   # ==========================================
-  # JOB 1: BUILD LLVM (TARGET UTAMA)
+  # JOB 0: START NOTIFICATION
+  # ==========================================
+  notify_start:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Start Msg
+        run: |
+          MSG="🚀 <b>Build Started, Bre!</b>%0A%0A"
+          MSG+="<b>Toolchain:</b> ${{ env.LLVM_NAME }}%0A"
+          MSG+="<b>Clang Ver:</b> ${{ env.CLANG_VERSION }}%0A%0A"
+          MSG+="<a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>监控 Logs Di Sini</a>"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
+            -d "parse_mode=HTML" \
+            -d "text=$MSG"
+
+  # ==========================================
+  # JOB 1: BUILD LLVM
   # ==========================================
   build_llvm:
+    needs: notify_start
     runs-on: ubuntu-22.04
     outputs:
       rel_date: ${{ steps.info.outputs.rel_date }}
@@ -43,61 +62,59 @@ jobs:
       - name: Preparation & Deps
         run: |
           sudo apt-get update
-          # Clone tc-build duluan biar bisa dapet script deps
           git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build llvmTC -b main
-          cd llvmTC
-          # Jalankan deps SEBELUM set environment compiler
-          bash ci.sh deps
+          cd llvmTC && bash ci.sh deps
 
       - name: Setup Host Compiler
         run: |
-          # Logic bypass Clang 23 buat llvm.sh
           HOST_VER=${{ env.CLANG_VERSION }}
           [ "$HOST_VER" -ge "21" ] && HOST_VER=20
           wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
           sudo ./llvm.sh $HOST_VER all
           echo "ACTUAL_HOST_VER=$HOST_VER" >> $GITHUB_ENV
 
-      - name: Clone LLVM
+      - name: Clone & Patch LLVM
         run: |
-          # 1. Setup Path Compiler & Ccache
           LLVM_PATH="/usr/lib/llvm-${{ env.ACTUAL_HOST_VER }}/bin"
-          export CC="$LLVM_PATH/clang"
-          export CXX="$LLVM_PATH/clang++"
-          export LD="$LLVM_PATH/ld.lld"
-          export PATH="$LLVM_PATH:$PATH"
+          export PATH="$LLVM_PATH:/usr/lib/ccache:$PATH"
           sudo apt-get install -y ccache
-          export PATH="/usr/lib/ccache:$PATH"
 
           cd llvmTC
           mkdir -p src
+          git clone --depth 1 https://github.com/llvm/llvm-project.git src/llvm-project
           
-          # 2. Clone manual dengan history dikit buat bisa di-revert
-          # Kita pake --depth 50 biar commit-commit barunya kebawa
-          REF="main" # Karena ini khusus buat Clang 23 (main)
-          echo "Cloning LLVM Project for patching..."
-          git clone --depth 1 -b "$REF" https://github.com/llvm/llvm-project.git src/llvm-project
           cd src/llvm-project
-          echo "Rolling back offending code to 'Sebelum' state..."
-          find . -name "*.cmake" -type f | xargs sed -i 's/if((WIN32 AND NOT MINGW) AND NOT CLANG_LINK_CLANG_DYLIB)/if(MSVC AND NOT CLANG_LINK_CLANG_DYLIB)/g'
-          sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' clang/cmake/modules/AddClang.cmake
-          sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' mlir/cmake/modules/AddMLIR.cmake
-          sed -i '/target_link_libraries(${obj_name} PRIVATE $<TARGET_PROPERTY:${name},LINK_LIBRARIES>)/d' llvm/cmake/modules/AddLLVM.cmake
-          sed -i 's/# Bring in the target include directories and link info from our original target./# Bring in the target include directories from our original target./g' llvm/cmake/modules/AddLLVM.cmake
-          echo "Rollback selesai! Kondisi kode sekarang sesuai dengan status 'Sebelum'."
-          cd ../..
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$CURRENT_BRANCH" == "main" ]; then
+            echo "🛠️ Patching 'main' branch..."
+            find . -name "*.cmake" -type f | xargs sed -i 's/if((WIN32 AND NOT MINGW) AND NOT CLANG_LINK_CLANG_DYLIB)/if(MSVC AND NOT CLANG_LINK_CLANG_DYLIB)/g'
+            sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' clang/cmake/modules/AddClang.cmake
+            sed -i 's/target_link_libraries(obj.${target} ${type} ${ARGN})/target_link_libraries(obj.${target} ${ARGN})/g' mlir/cmake/modules/AddMLIR.cmake
+            sed -i '/target_link_libraries(${obj_name} PRIVATE $<TARGET_PROPERTY:${name},LINK_LIBRARIES>)/d' llvm/cmake/modules/AddLLVM.cmake
+            sed -i 's/# Bring in the target include directories and link info from our original target./# Bring in the target include directories from our original target./g' llvm/cmake/modules/AddLLVM.cmake
+          fi
+
+      - name: Build LLVM
+        run: |
+          cd llvmTC
+          # Kita simpan log ke file biar bisa dikirim kalau error
           python3 build-llvm.py \
             --defines LLVM_PARALLEL_COMPILE_JOBS="$(nproc)" \
                       LLVM_PARALLEL_LINK_JOBS="$(nproc)" \
                       CMAKE_C_FLAGS=-O3 CMAKE_CXX_FLAGS=-O3 \
             --install-folder "$(pwd)/install" \
             --llvm-folder "$(pwd)/src/llvm-project" \
-            --quiet-cmake \
-            --shallow-clone \
-            --multicall \
-            --targets ARM AArch64 X86 \
-            --vendor-string "${{ env.LLVM_NAME }}"
-            
+            --quiet-cmake --shallow-clone --multicall \
+            --targets ARM AArch64 X86 --vendor-string "${{ env.LLVM_NAME }}" 2>&1 | tee ../llvm_build.log
+          # Penting: cek exit status tee
+          [ ${PIPESTATUS[0]} -eq 0 ] || exit 1
+
+      - name: Send Error Log (LLVM)
+        if: failure()
+        run: |
+          tail -n 100 llvm_build.log > llvm_error_tail.txt
+          curl -F document=@"llvm_error_tail.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ LLVM Build Failed (Tail Log)"
+
       - name: Set Metadata
         id: info
         run: |
@@ -116,42 +133,47 @@ jobs:
   build_binutils:
     needs: build_llvm
     runs-on: ubuntu-22.04
+    outputs:
+      archive_size: ${{ steps.pack.outputs.archive_size }}
+      archive_name: ${{ steps.pack.outputs.archive_name }}
     steps:
       - uses: actions/checkout@v4
-      
       - name: Download LLVM Artifact
         uses: actions/download-artifact@v4
         with:
           name: llvm-install
           path: install_folder
 
-      - name: Build Binutils & Cleanup
+      - name: Build Binutils
         run: |
-          sudo apt-get update
-          sudo apt-get install -y patchelf file
+          sudo apt-get update && sudo apt-get install -y patchelf file
           git clone --recursive --depth=1 https://github.com/ClangBuiltLinux/tc-build tc_binutils -b main
           cd tc_binutils
-          # Deps lagi buat VM baru ini
           bash ci.sh deps
-          
-          # Pindahin hasil build LLVM tadi ke folder install tc-build
           mv ../install_folder install
-          
-          # Build Binutils
-          python3 build-binutils.py --install-folder "$(pwd)/install" --targets arm aarch64 x86_64
-          
-          # Cleanup, Strip, & Patch
+          python3 build-binutils.py --install-folder "$(pwd)/install" --targets arm aarch64 x86_64 2>&1 | tee ../binutils_build.log
+          [ ${PIPESTATUS[0]} -eq 0 ] || exit 1
+
+      - name: Send Error Log (Binutils)
+        if: failure()
+        run: |
+          tail -n 100 binutils_build.log > binutils_error_tail.txt
+          curl -F document=@"binutils_error_tail.txt" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendDocument?chat_id=${{ env.TELEGRAM_CHAT_ID }}&caption=❌ Binutils Build Failed (Tail Log)"
+
+      - name: Packing & Calc Size
+        id: pack
+        run: |
+          cd tc_binutils
           rm -rf install/include
           find install/lib -name "*.a" -delete -o -name "*.la" -delete
           find install -type f -exec file {} \; | grep 'not stripped' | awk -F: '{print $1}' | xargs -r strip -s
-          find install -mindepth 2 -maxdepth 3 -type f -exec file {} \; | grep 'ELF .* interpreter' | awk -F: '{print $1}' | while read -r bin; do
-            patchelf --set-rpath "\$ORIGIN/../lib" "$bin"
-          done
-
-          # Packing
+          
           ARCHIVE="${{ env.LLVM_NAME }}-Clang-${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}.tar.xz"
           tar -cJf "../$ARCHIVE" -C install .
-          echo "ARCHIVE_NAME=$ARCHIVE" >> $GITHUB_ENV
+          
+          SIZE=$(du -sh "../$ARCHIVE" | awk '{print $1}')
+          echo "archive_size=$SIZE" >> $GITHUB_OUTPUT
+          echo "archive_name=$ARCHIVE" >> $GITHUB_OUTPUT
 
       - name: Upload Final Toolchain
         uses: actions/upload-artifact@v4
@@ -160,46 +182,40 @@ jobs:
           path: "*.tar.xz"
 
   # ==========================================
-  # JOB 3: DEPLOY (RELEASE & TELEGRAM)
+  # JOB 3: DEPLOY & POST-NOTIFICATION
   # ==========================================
   deploy:
     needs: [build_llvm, build_binutils]
-    runs-on: ubuntu-22.04
-    # KUNCI UTAMA: Tetep jalan walau ada job yang failed atau cancelled
-    if: always() 
+    runs-on: ubuntu-latest
+    if: always()
     steps:
-      - name: Download Package (Hanya jika binutils sukses)
-        # Kita kasih proteksi biar ga error pas nyoba download file yang ga ada
-        if: needs.build_binutils.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: final-package
-
-      - name: Create GitHub Release
+      - name: Create Release
         if: needs.build_binutils.result == 'success'
         run: |
+          gh run download ${{ github.run_id }} -n final-package
           TAG="${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}"
           TITLE="${{ env.LLVM_NAME }} Clang ${{ env.CLANG_VERSION }}: ${{ needs.build_llvm.outputs.rel_friendly }}"
-          gh release create "$TAG" *.tar.xz --repo "${{ env.TARGET_REPO }}" --title "$TITLE" --notes "Build Berhasil"
+          gh release create "$TAG" *.tar.xz --repo "${{ env.TARGET_REPO }}" --title "$TITLE" --notes "Build via GitHub Actions"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Telegram Notification
+      - name: Final Telegram Notification
         run: |
-          # Logic buat nentuin pesan berdasarkan hasil job sebelumnya
           if [[ "${{ needs.build_llvm.result }}" == "success" && "${{ needs.build_binutils.result }}" == "success" ]]; then
-            STAT="✅ <b>Build Success, Bre!</b>"
-            URL="https://github.com/${{ env.TARGET_REPO }}/releases/tag/${{ env.CLANG_VERSION }}-${{ needs.build_llvm.outputs.rel_date }}"
-          elif [[ "${{ needs.build_llvm.result }}" == "failure" ]]; then
-            STAT="❌ <b>Build LLVM Gagal!</b>"
-            URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            STAT="✅ <b>BUILD SUCCESS, BRE!</b>"
+            INFO="%0A<b>Size:</b> ${{ needs.build_binutils.outputs.archive_size }}%0A"
+            URL="https://github.com/${{ env.TARGET_REPO }}/releases/latest"
           else
-            STAT="⚠️ <b>Build LLVM Sukses, tapi Binutils Gagal!</b>"
+            STAT="❌ <b>BUILD FAILED!</b>"
+            INFO="%0A<b>Check attached logs below</b>%0A"
             URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           
           MSG="$STAT%0A%0A"
-          MSG+="<b>Toolchain:</b> ${{ env.LLVM_NAME }}%0A"
-          MSG+="<b>Versi:</b> ${{ env.CLANG_VERSION }}%0A%0A"
-          MSG+="<a href='$URL'>Cek Detailnya Di Sini</a>"
+          MSG+="<b>Name:</b> ${{ env.LLVM_NAME }}%0A"
+          MSG+="<b>Ver:</b> ${{ env.CLANG_VERSION }}%0A"
+          MSG+="<b>Status:</b> LLVM (${{ needs.build_llvm.result }}), Binutils (${{ needs.build_binutils.result }})$INFO%0A"
+          MSG+="<a href='$URL'>Lihat Hasil / Full Logs</a>"
 
           curl -s -X POST "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage" \
             -d "chat_id=${{ env.TELEGRAM_CHAT_ID }}" \
