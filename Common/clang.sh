@@ -38,7 +38,7 @@ chmod +x build-llvm.py
     --shallow-clone \
 	--multicall \
     --targets ARM AArch64 X86 \
-    --ref "main" \
+    --ref "release/22.x" \
     --vendor-string "$LLVM_NAME" 2>&1 | tee build.log
 
 # Check if the final clang binary exists or not.
